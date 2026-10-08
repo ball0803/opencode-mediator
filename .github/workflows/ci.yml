@@ -1,0 +1,37 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+      - run: bun install --frozen-lockfile
+      - run: bun test
+        env:
+          OPENCODE_MEDIATOR_SKIP_LAT_CHECK: "1"
+
+  lat-md-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install lat.md
+        run: npm install -g lat.md@0.12.2
+      - name: lat check md
+        run: lat check md
+      - name: lat check sections
+        run: lat check sections

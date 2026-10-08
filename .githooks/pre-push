@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# .githooks/pre-push
+# Warn-only lat.md check on every push. Same pattern as pre-commit.
+# Skip env: OPENCODE_MEDIATOR_SKIP_LAT_CHECK=1
+
+set -euo pipefail
+
+if [ -n "${OPENCODE_MEDIATOR_SKIP_LAT_CHECK:-}" ]; then
+  echo "[skip] pre-push lat check (OPENCODE_MEDIATOR_SKIP_LAT_CHECK=1)"
+  exit 0
+fi
+
+if ! command -v lat >/dev/null 2>&1; then
+  echo "[skip] pre-push lat check (lat not installed)"
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[pre-push] running lat check md..."
+if lat check md 2>&1 | tail -20; then
+  echo "[pre-push] running lat check sections..."
+  if lat check sections 2>&1 | tail -20; then
+    echo "[ok] pre-push lat check passed"
+    exit 0
+  else
+    echo "[warn] pre-push lat check sections found issues (continuing anyway)"
+    exit 0
+  fi
+else
+  echo "[warn] pre-push lat check md found issues (continuing anyway)"
+  exit 0
+fi

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Warn-only lat.md check. Gates on staged .md files in docs/.
+# Skip env: OPENCODE_MEDIATOR_SKIP_LAT_CHECK=1
+
+set -euo pipefail
+
+if [ -n "${OPENCODE_MEDIATOR_SKIP_LAT_CHECK:-}" ]; then
+  echo "[skip] pre-commit lat check (OPENCODE_MEDIATOR_SKIP_LAT_CHECK=1)"
+  exit 0
+fi
+
+if ! command -v lat >/dev/null 2>&1; then
+  echo "[skip] pre-commit lat check (lat not installed)"
+  exit 0
+fi
+
+staged_md=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(md|mdx)$' || true)
+if [ -z "$staged_md" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if lat check md 2>&1 | tail -20; then
+  lat check sections 2>&1 | tail -20
+  echo "[ok] pre-commit lat check passed"
+  exit 0
+else
+  echo "[warn] pre-commit lat check found issues (continuing anyway)"
+  exit 0
+fi

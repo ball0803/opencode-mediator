@@ -1,0 +1,23 @@
+name: pilotty
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pilotty:
+    if: contains(github.event.pull_request.labels.*.name, 'run-pilotty')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+      - run: bun install --frozen-lockfile
+      - name: pilotty end-to-end (dev-machine only, gated by PR label)
+        run: echo "pilotty is dev-machine only; CI run gated by 'run-pilotty' label; example at examples/manual-pilotty.md"
+        env:
+          OPENCODE_MEDIATOR_SKIP_LAT_CHECK: "1"
