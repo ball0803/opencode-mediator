@@ -1,7 +1,11 @@
 import { ulid } from "ulid";
 import { mkdir, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { homedir as _realHomedir } from "node:os";
+
+function home(): string {
+  return process.env.HOME ?? _realHomedir();
+}
 
 /**
  * A record as written to JSONL. The plugin (Phase 4) builds this; the writer
@@ -80,5 +84,5 @@ export class JsonlWriter {
 
 /** Default runtime data dir. */
 export function defaultBaseDir(): string {
-  return join(homedir(), ".local", "share", "opencode", "mediator");
+  return join(home(), ".local", "share", "opencode", "mediator");
 }

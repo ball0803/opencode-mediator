@@ -9,18 +9,31 @@
  * Trust boundary (D1): the agent never self-records. Every event is observed
  * from outside the LLM context. Chain mutation serialized via KeyedMutex (D22).
  * Record writes go through JsonlWriter's single-writer Promise queue (D21).
+ *
+ * Patch apply wiring (D19, D23, D29):
+ *   - `apply_refiner_patch` tool.execute.before: Zod-validate args, enforce Refiner allowlist
+ *   - `apply_refiner_patch` tool.execute.after: call applyPatch, write file, mark empirical-eval pending
+ *   - `experimental.session.compacting`: push latest prompt into output.context (dual-channel)
  */
 
-import { mkdir, chmod, writeFile } from "node:fs/promises";
+import { mkdir, chmod, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir as _realHomedir } from "node:os";
+
+function home(): string {
+  return process.env.HOME ?? _realHomedir();
+}
 import { ulid } from "ulid";
 import { z } from "zod";
 import type { Hooks, Plugin } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
 import { KeyedMutex } from "../lib/mutex.ts";
 import { JsonlWriter, type Record as JsonlRecord, type RecordIteration } from "../lib/jsonl-writer.ts";
+import { globalRefinerAllowlist } from "../lib/refiner-allowlist.ts";
+import { applyPatch, type PatchInput, type PatchOp } from "./patch-apply.ts";
+import { createState, markPending, type EvaluationState } from "../lib/empirical-evaluation.ts";
+import { PatchSchema } from "../schemas/patch.ts";
 
 const APPROVE_KEYWORDS = ["approve", "go", "proceed", "ship it"] as const;
 
@@ -60,12 +73,16 @@ let recordsDirChmodDone = false;
 
 export async function ensureRecordsDirChmod(): Promise<void> {
   if (recordsDirChmodDone) return;
-  const dir = join(homedir(), ".local", "share", "opencode", "mediator", "records");
+  const dir = join(home(), ".local", "share", "opencode", "mediator", "records");
   if (!existsSync(dir)) {
     await mkdir(dir, { recursive: true });
   }
-  await chmod(dir, 0o600);
+  await chmod(dir, 0o700);
   recordsDirChmodDone = true;
+}
+
+export function __resetRecordsDirChmodForTesting(): void {
+  recordsDirChmodDone = false;
 }
 
 export function getOrCreateSession(sessionId: string): SessionState {
@@ -200,7 +217,7 @@ function handleCommandExecuted(event: Event): void {
     console.warn("[recorder] /mediator-restore requires a section_id");
     return;
   }
-  const archiveBase = join(homedir(), ".local", "share", "opencode", "mediator", "archive");
+  const archiveBase = join(home(), ".local", "share", "opencode", "mediator", "archive");
   console.log(`[recorder] /mediator-restore ${sectionId} — Phase 8 wiring (archive dir: ${archiveBase})`);
 }
 
@@ -209,7 +226,7 @@ async function handlePermissionReplied(event: Event): Promise<void> {
   const props = event.properties as { sessionID?: string; response?: string };
   if (!props.sessionID) return;
   if (props.response !== "deny" && props.response !== "no") return;
-  const dir = join(homedir(), ".local", "share", "opencode", "mediator", "permissions");
+  const dir = join(home(), ".local", "share", "opencode", "mediator", "permissions");
   await mkdir(dir, { recursive: true });
   const id = ulid();
   await writeFile(join(dir, `${id}.json`), JSON.stringify({ sessionID: props.sessionID, response: props.response, at: Date.now() }, null, 2));
@@ -220,6 +237,163 @@ function handleCompacting(event: Event): void {
   const sessionID = (event.properties as { sessionID?: string }).sessionID;
   if (!sessionID) return;
   console.log(`[recorder] session.compacted ${sessionID} — Phase 5 dual-channel wiring (D23)`);
+}
+
+function mediatorPromptPath(): string {
+  return process.env.OPENCODE_MEDIATOR_PROMPT_PATH ??
+    join(home(), ".local", "share", "opencode", "mediator", "prompts", "mediator.md");
+}
+
+function loadEmpiricalState(): EvaluationState {
+  return createState();
+}
+
+function toInternalPatch(parsed: z.infer<typeof PatchSchema>): PatchInput {
+  return {
+    patchId: parsed.patch_id,
+    reason: parsed.reason ?? "",
+    ops: parsed.ops.map(
+      (op): PatchOp => ({
+        op: op.op,
+        sectionId: op.section_id,
+        content: op.content,
+        beforeSectionId: op.before_section_id,
+        afterSectionId: op.after_section_id,
+        provenance: op.provenance,
+        rationale: op.rationale,
+      }),
+    ),
+  };
+}
+
+export interface CompactingHookInput {
+  sessionID: string;
+}
+
+export interface CompactingHookOutput {
+  context?: string[];
+  prompt?: string;
+}
+
+export interface CompactingDeps {
+  promptPath?: string;
+  readFileFn?: (path: string) => Promise<string | null>;
+}
+
+/**
+ * Compaction hook (D23, dual-channel). Reads the latest mediator prompt
+ * and pushes it into the output.context so the next compaction-injected
+ * context includes the live prompt. If the prompt file is missing or
+ * unreadable, pushes a placeholder so the agent knows the path it tried.
+ */
+export async function handleCompactingHook(
+  input: CompactingHookInput,
+  output: CompactingHookOutput,
+  deps: CompactingDeps = {},
+): Promise<void> {
+  if (!input.sessionID) return;
+  const path = deps.promptPath ?? mediatorPromptPath();
+  const read = deps.readFileFn ?? (async (p: string) => existsSync(p) ? await readFile(p, "utf-8") : null);
+  let promptContent: string | null = null;
+  try {
+    promptContent = await read(path);
+  } catch (err) {
+    console.warn(`[recorder] could not read mediator prompt for compaction: ${(err as Error).message}`);
+  }
+  const ctx = output.context;
+  if (ctx && promptContent) {
+    ctx.push(`# Mediator prompt (latest)\n\n${promptContent}`);
+  } else if (ctx) {
+    ctx.push(`# Mediator prompt (latest)\n\n[unavailable: ${path}]`);
+  }
+}
+
+export interface ApplyRefinerBeforeInput {
+  tool: string;
+  sessionID: string;
+  callID: string;
+}
+
+export interface ApplyRefinerBeforeOutput {
+  args?: unknown;
+}
+
+export interface ApplyRefinerBeforeDeps {
+  allowlist?: { has: (token: string) => boolean };
+}
+
+/**
+ * `apply_refiner_patch` tool.execute.before: Zod-validate the args, and
+ * enforce the Refiner allowlist (D24). If a `remove` op appears without
+ * an allowlist token, reject. Other ops are permitted without a token
+ * because they are additive (add/revise/reorder are all reversible by
+ * the empirical-eval loop).
+ */
+export function handleApplyRefinerPatchBefore(
+  input: ApplyRefinerBeforeInput,
+  output: ApplyRefinerBeforeOutput,
+  deps: ApplyRefinerBeforeDeps = {},
+): void {
+  if (input.tool !== "apply_refiner_patch") return;
+  const args = output.args;
+  const parsed = PatchSchema.safeParse(args);
+  if (!parsed.success) {
+    throw new Error(`[recorder] apply_refiner_patch payload failed schema: ${parsed.error.message}`);
+  }
+  const allowlist = deps.allowlist ?? globalRefinerAllowlist;
+  const hasToken =
+    "hasForSession" in allowlist
+      ? (allowlist as { hasForSession: (s: string) => boolean }).hasForSession(input.sessionID) ||
+        (allowlist as { hasForSession: (s: string) => boolean }).hasForSession(parsed.data.patch_id)
+      : allowlist.has(`rfl_${input.sessionID}`);
+  if (!hasToken) {
+    const hasRemove = parsed.data.ops.some((op) => op.op === "remove");
+    if (hasRemove) {
+      throw new Error(
+        "[recorder] apply_refiner_patch with `remove` op requires an active Refiner allowlist token. " +
+          "Spawn a Refiner via the Mediator's patch workflow, not from a bare user turn.",
+      );
+    }
+  }
+}
+
+export interface ApplyRefinerAfterInput {
+  tool: string;
+  sessionID: string;
+  callID: string;
+  args?: unknown;
+}
+
+export interface ApplyRefinerAfterDeps {
+  applyPatchFn?: typeof applyPatch;
+  markPendingFn?: typeof markPending;
+  loadStateFn?: () => EvaluationState;
+  promptPath?: string;
+}
+
+/**
+ * `apply_refiner_patch` tool.execute.after: call applyPatch to write the
+ * prompt file (atomic: tmp + rename), then mark each section's
+ * empirical-eval as pending. The markPending calls are V9: 1 record
+ * flags the section, 3 records confirm.
+ */
+export async function handleApplyRefinerPatchAfter(
+  input: ApplyRefinerAfterInput,
+  deps: ApplyRefinerAfterDeps = {},
+): Promise<void> {
+  if (input.tool !== "apply_refiner_patch") return;
+  const parsed = PatchSchema.safeParse(input.args);
+  if (!parsed.success) return;
+  const internal = toInternalPatch(parsed.data);
+  const apply = deps.applyPatchFn ?? applyPatch;
+  const mark = deps.markPendingFn ?? markPending;
+  const load = deps.loadStateFn ?? loadEmpiricalState;
+  const path = deps.promptPath ?? mediatorPromptPath();
+  let evalState: EvaluationState = load();
+  await apply(internal, { promptPath: path, empiricalEvaluation: evalState });
+  for (const op of internal.ops) {
+    evalState = mark(evalState, op.sectionId, internal.patchId, "refiner");
+  }
 }
 
 const RecorderPlugin: Plugin = async () => {
@@ -251,46 +425,69 @@ const RecorderPlugin: Plugin = async () => {
     },
     "tool.execute.before": async (input, output) => {
       const { tool: toolName, sessionID } = input;
-      if (!sessionID || toolName !== "mediator_emit_intent") return;
-      const parsed = WorkingIntentSchema.safeParse(output.args);
-      if (!parsed.success) {
-        throw new Error(`[recorder] mediator_emit_intent payload failed schema: ${parsed.error.message}`);
+      if (!sessionID) return;
+      if (toolName === "mediator_emit_intent") {
+        const parsed = WorkingIntentSchema.safeParse(output.args);
+        if (!parsed.success) {
+          throw new Error(`[recorder] mediator_emit_intent payload failed schema: ${parsed.error.message}`);
+        }
+        const intent: WorkingIntent = parsed.data;
+        const approved = await chainMutex.withKey(sessionID, async () => {
+          const s = getOrCreateSession(sessionID);
+          const lastEntry = s.chain[s.chain.length - 1];
+          if (!lastEntry) {
+            throw new Error("[recorder] mediator_emit_intent with empty chain");
+          }
+          const ok = lastUserMessageHasApproval(s.chain) || isGreenLightOnSummary(lastEntry.userMessage, intent);
+          if (!ok) {
+            throw new Error(
+              "[recorder] mediator_emit_intent requires explicit approval. " +
+                "Bare 'yes/ok' is NOT approval. Use 'approve / go / proceed / ship it' or green-light the summary.",
+            );
+          }
+          lastEntry.workingIntent = intent;
+          lastEntry.approvedAt = Date.now();
+          return true;
+        });
+        if (!approved) return;
+        return;
       }
-      const intent: WorkingIntent = parsed.data;
-      const approved = await chainMutex.withKey(sessionID, async () => {
-        const s = getOrCreateSession(sessionID);
-        const lastEntry = s.chain[s.chain.length - 1];
-        if (!lastEntry) {
-          throw new Error("[recorder] mediator_emit_intent with empty chain");
-        }
-        const ok = lastUserMessageHasApproval(s.chain) || isGreenLightOnSummary(lastEntry.userMessage, intent);
-        if (!ok) {
-          throw new Error(
-            "[recorder] mediator_emit_intent requires explicit approval. " +
-              "Bare 'yes/ok' is NOT approval. Use 'approve / go / proceed / ship it' or green-light the summary.",
-          );
-        }
-        lastEntry.workingIntent = intent;
-        lastEntry.approvedAt = Date.now();
-        return true;
-      });
-      if (!approved) return;
+      if (toolName === "apply_refiner_patch") {
+        handleApplyRefinerPatchBefore(
+          { tool: toolName, sessionID, callID: input.callID },
+          { args: (output as { args?: unknown }).args },
+        );
+        return;
+      }
     },
     "tool.execute.after": async (input, _output) => {
       const { tool: toolName, sessionID } = input;
-      if (!sessionID || toolName !== "mediator_emit_intent") return;
-      await chainMutex.withKey(sessionID, async () => {
-        const s = getOrCreateSession(sessionID);
-        const lastEntry = s.chain[s.chain.length - 1];
-        if (!lastEntry || !lastEntry.workingIntent) return;
-        if (lastEntry.recordWritten) return;
-        await writeRecord(s, lastEntry.workingIntent);
-      });
-    },
-    "experimental.session.compacting": async (input, _output) => {
-      const { sessionID } = input;
       if (!sessionID) return;
-      console.log(`[recorder] session.compacting ${sessionID} — Phase 5 dual-channel wiring (D23)`);
+      if (toolName === "mediator_emit_intent") {
+        await chainMutex.withKey(sessionID, async () => {
+          const s = getOrCreateSession(sessionID);
+          const lastEntry = s.chain[s.chain.length - 1];
+          if (!lastEntry || !lastEntry.workingIntent) return;
+          if (lastEntry.recordWritten) return;
+          await writeRecord(s, lastEntry.workingIntent);
+        });
+        return;
+      }
+      if (toolName === "apply_refiner_patch") {
+        await handleApplyRefinerPatchAfter({
+          tool: toolName,
+          sessionID,
+          callID: input.callID,
+          args: (input as { args?: unknown }).args,
+        });
+        return;
+      }
+    },
+    "experimental.session.compacting": async (input, output) => {
+      await handleCompactingHook(
+        { sessionID: input.sessionID },
+        { context: (output as { context?: string[] }).context, prompt: (output as { prompt?: string }).prompt },
+      );
     },
   };
   return hooks;

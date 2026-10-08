@@ -107,10 +107,11 @@ if [ ! -f "$OC_CFG" ]; then
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
     "./plugins/recorder.ts",
+    "./plugins/patch-apply.ts",
     "./.opencode/plugins/lat-md-enforce.ts"
   ],
   "agent": {
-    "mediator": { "prompt": "{file:./prompts/mediator.md}" }
+    "mediator": { "prompt": "{file:./agents/mediator.md}" }
   },
   "mcp": {
     "lat-md": { "type": "local", "command": ["npx", "-y", "lat.md@0.12.2", "mcp"] }
