@@ -7,7 +7,8 @@
  * The user's main `~/.config/opencode/opencode.json` is never mutated by the plugin.
  */
 
-import { tool, z } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin";
+import { z } from "zod";
 
 const ApplyRefinerPatchArgsSchema = z.object({
   patch_id: z.string().describe("The Refiner's patch_id (ulid)."),

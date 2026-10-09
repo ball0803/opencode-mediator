@@ -38,7 +38,7 @@ describe("JsonlWriter (D21, S5)", () => {
     const writer = new JsonlWriter("session-1", tmpDir);
     const result = await writer.append(makeRecord("session-1", 1));
     expect(result).not.toBeNull();
-    expect(result!.emit_intent_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(result!.emit_intent_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 
     const content = readFileSync(writer.getPath(), "utf-8");
     const lines = content.trim().split("\n");

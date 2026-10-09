@@ -17,7 +17,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, writeFile, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import RecorderPlugin, { __resetRecordsDirChmodForTesting } from "../plugins/recorder.ts";
+import { RecorderPlugin, __resetRecordsDirChmodForTesting } from "../plugins/recorder.ts";
 import { globalRefinerAllowlist } from "../lib/refiner-allowlist.ts";
 import type { Hooks } from "@opencode-ai/plugin";
 

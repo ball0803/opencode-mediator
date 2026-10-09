@@ -1,7 +1,7 @@
-import { ulid } from "ulid";
 import { mkdir, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir as _realHomedir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 function home(): string {
   return process.env.HOME ?? _realHomedir();
@@ -29,7 +29,7 @@ export interface RecordIteration {
 }
 
 export interface StoredRecord extends Record {
-  readonly emit_intent_id: string; // ulid, set by writer for idempotency
+  readonly emit_intent_id: string; // set by writer for idempotency
 }
 
 /**
@@ -55,7 +55,7 @@ export class JsonlWriter {
    * emit_intent_id) or null if the intent was already seen (idempotency).
    */
   async append(record: Record): Promise<StoredRecord | null> {
-    const id = ulid();
+    const id = randomUUID();
     const stored: StoredRecord = { ...record, emit_intent_id: id };
 
     const next = this.writeQueue.then(async () => {

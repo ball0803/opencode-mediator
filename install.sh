@@ -61,6 +61,16 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 run cd "$REPO_ROOT"
 run bun install --frozen-lockfile
 
+mkdir -p "$REPO_ROOT/.build/plugins"
+run bun build "$REPO_ROOT/plugins/recorder.ts" \
+  --target=bun --format=esm \
+  --external @opencode-ai/sdk --external @opencode-ai/plugin \
+  --outfile "$REPO_ROOT/.build/plugins/recorder.js"
+run bun build "$REPO_ROOT/plugins/patch-apply.ts" \
+  --target=bun --format=esm \
+  --external @opencode-ai/sdk --external @opencode-ai/plugin \
+  --outfile "$REPO_ROOT/.build/plugins/patch-apply.js"
+
 if [ -z "$SKIP_LAT" ]; then
   run lat init || true
 else
@@ -90,10 +100,8 @@ link() {
 
 link "$REPO_ROOT/agents/mediator.md"      "$INSTALL_DIR/agents/mediator.md"
 link "$REPO_ROOT/agents/refiner.md"       "$INSTALL_DIR/agents/refiner.md"
-link "$REPO_ROOT/tools/mediator-emit-intent.ts" "$INSTALL_DIR/tools/mediator-emit-intent.ts"
-link "$REPO_ROOT/tools/apply-refiner-patch.ts"   "$INSTALL_DIR/tools/apply-refiner-patch.ts"
-link "$REPO_ROOT/plugins/recorder.ts"     "$INSTALL_DIR/plugins/recorder.ts"
-link "$REPO_ROOT/plugins/patch-apply.ts"   "$INSTALL_DIR/plugins/patch-apply.ts"
+link "$REPO_ROOT/.build/plugins/recorder.js"      "$INSTALL_DIR/plugins/recorder.js"
+link "$REPO_ROOT/.build/plugins/patch-apply.js"   "$INSTALL_DIR/plugins/patch-apply.js"
 link "$REPO_ROOT/.opencode/plugins/lat-md-enforce.ts" "$INSTALL_DIR/.opencode/plugins/lat-md-enforce.ts"
 link "$REPO_ROOT/.agents/skills/lat-md"   "$INSTALL_DIR/.agents/skills/lat-md"
 link "$REPO_ROOT/docs/lat.md"             "$INSTALL_DIR/lat.md"
@@ -106,8 +114,8 @@ if [ ! -f "$OC_CFG" ]; then
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "./plugins/recorder.ts",
-    "./plugins/patch-apply.ts",
+    "./plugins/recorder.js",
+    "./plugins/patch-apply.js",
     "./.opencode/plugins/lat-md-enforce.ts"
   ],
   "agent": {
@@ -126,13 +134,15 @@ fi
 cat <<DONE
 opencode-mediator install complete.
 
+Built:
+  $REPO_ROOT/.build/plugins/recorder.js
+  $REPO_ROOT/.build/plugins/patch-apply.js
+
 Linked:
   $INSTALL_DIR/agents/mediator.md
   $INSTALL_DIR/agents/refiner.md
-  $INSTALL_DIR/tools/mediator-emit-intent.ts
-  $INSTALL_DIR/tools/apply-refiner-patch.ts
-  $INSTALL_DIR/plugins/recorder.ts
-  $INSTALL_DIR/plugins/patch-apply.ts
+  $INSTALL_DIR/plugins/recorder.js
+  $INSTALL_DIR/plugins/patch-apply.js
   $INSTALL_DIR/.opencode/plugins/lat-md-enforce.ts
   $INSTALL_DIR/.agents/skills/lat-md
   $INSTALL_DIR/lat.md

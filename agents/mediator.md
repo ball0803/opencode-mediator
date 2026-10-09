@@ -5,7 +5,11 @@ permission:
   edit: deny
   bash: deny
   webfetch: deny
-prompt: "{file:./prompts/mediator.md}"
+  task: allow
+  write:
+    "*.md": "ask"
+    "*": "deny"
+prompt: "{file:/home/camel/.config/opencode/work/opencode-mediator/prompts/mediator.md}"
 ---
 
 # Mediator — primary agent
